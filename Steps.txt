@@ -1,0 +1,253 @@
+the code is training with 1 signal acceleration
+
+1- First, install all requirements.
+
+2- Open cell jupyter, download the data that is in shared drive carpet called DATA.
+
+2.5- Open python file train_TGAN and change the file path with the file u download the data
+
+
+3- RUN IN 1 CELL JUPYTER TO READ FILES, first modify and REEPLACE data_file with ur file path.
+
+#was modfiied the normalziation, feature and global, then the static global normalization.
+# WE DIDI CORRCETION O FNORMALIZING C STATIC BEFORE FEEDING IT TO THE MODEL
+
+# corrección de datos + normalización
+from lib.data_preprocess import fit_global_scalers, load_data
+import numpy as np
+import joblib
+
+
+data_file = r"C:\Users\gjesu\Desktop\ThesiS JBP\Data\all_signals_processed.mat"
+seq_len = 256
+
+# 1) Fit global scalers (UNA SOLA VEZ)
+scaler_dyn, scaler_static = fit_global_scalers(
+    data_file,
+    accel_names=['Accel1','Accel2','Accel3','Accel4'],
+    c_time_names=['Motor_current','Speed','Temperature']
+)
+
+
+
+
+# 2) Load dataset usando esos scalers
+X, C_time, C_static, feature_names = load_data(
+    data_type="mytests",
+    seq_len=seq_len,
+    file_list=[data_file],
+    scaler_dyn=scaler_dyn,
+    scaler_static=scaler_static,
+    step=128,
+    max_sequences_per_experiment=250
+)
+
+# 3) Sanity check
+print("N sequences:", len(X))
+print("X shape:", X[0].shape)
+print("C_time shape:", C_time[0].shape)
+print("C_static shape:", C_static[0].shape)
+print("Unique C_static:\n", np.unique(np.array(C_static), axis=0))
+print("Features:", feature_names)
+
+
+
+4- Run the train in a different jupyter cell
+
+
+from options_TGAN import Options
+from lib.TimeGAN import TimeGAN
+
+# ---------------------------------------
+# 1. OPTIONS
+# ---------------------------------------
+
+
+
+opt = Options().parse()
+
+# Activate CONDITIONAL MODE
+opt.conditional = True
+
+# Print frequency
+opt.print_freq = 100
+
+# ---------------------------------------
+# 2. Hyperparameters (paper-style)
+# ---------------------------------------
+opt.lr_g = 6.5e-5      # Generator
+opt.lr_d = 1.5e-5      # Discriminator
+opt.lr_e = 1e-4      # Encoder
+opt.lr_r = 5e-4      # Recovery
+opt.lr_s = 2e-4      # Supervisor
+
+opt.beta1 = 0.5
+
+opt.batch_size = 128
+opt.iteration = 800     # You will increase later to 3k–8k
+
+opt.hidden_dim = 128
+opt.num_layer = 2
+
+opt.n_critic = 5
+opt.gp_lambda = 1.5
+
+opt.name = "TimeGAN_conditional_paper_settings"
+
+# Loss weights
+#this value works good of wg
+opt.w_g     = 5.0
+opt.w_e0    = 5.0
+opt.w_es    = 0.5
+opt.w_gamma = 1.0
+
+
+# ---------------------------------------
+# 3. CREATE THE MODEL  (CONDITIONAL)
+# ---------------------------------------
+# Note: use the NEW data structure: X_list, C_time_list, C_static_list
+
+model = TimeGAN(
+    opt,
+    X,        # your accelerometer sequences
+    C_time,   # time-varying conditions (RPM, current, temp)
+    C_static  # static conditions (weight, distance)
+)
+
+print("\n✅ Conditional TimeGAN initialized successfully\n")
+
+
+# ---------------------------------------
+# 4. TRAIN
+# ---------------------------------------
+model.train()
+
+5. Run in another jupytre cell, plots.
+
+from generation_conditional import generate_batch_from_conditions
+import numpy as np
+
+#PER SEUENCE NO POR FEATURE
+# Select random indices
+n_vis = 10000
+idx_list = np.random.choice(len(X), n_vis, replace=False)
+
+# Generate synthetic sequences USING THE SAME CONDITIONS
+generated_data = generate_batch_from_conditions(
+    model,
+    C_time,
+    C_static,
+    idx_list,
+    
+)
+
+# Real samples for visualization
+ori_vis = [X[i] for i in idx_list]
+
+# Visualizations
+from visualization_TGAN import visualization
+visualization(ori_vis, generated_data, 'pca')
+visualization(ori_vis, generated_data, 'tsne')
+
+#PLOT TEMPORAL SERIE PER FEATURE
+import matplotlib.pyplot as plt
+
+i = idx_list[0]  # una muestra cualquiera
+
+plt.figure(figsize=(10,4))
+plt.plot(X[i][:,0], label="Real", linewidth=2)
+plt.plot(generated_data[0][:,0], label="Synthetic", linestyle="--")
+plt.title("Time series comparison (Accel1)")
+plt.xlabel("Time step")
+plt.ylabel("Normalized amplitude")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+#PLOT HISTOGRAMA / MARGINAL DSTBTN PER FEATURE
+real_vals = np.concatenate([x[:,0] for x in ori_vis[:200]])
+syn_vals  = np.concatenate([x[:,0] for x in generated_data[:200]])
+
+plt.figure(figsize=(6,4))
+plt.hist(real_vals, bins=50, alpha=0.6, label="Real", density=True)
+plt.hist(syn_vals, bins=50, alpha=0.6, label="Synthetic", density=True)
+plt.title("Amplitude distribution (Accel1)")
+plt.xlabel("Normalized amplitude")
+plt.ylabel("Density")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+print("STD real:", np.std(real_vals))
+print("STD synthetic:", np.std(syn_vals))
+
+6. Run in a different jupyter cell, stadistical values
+
+# ==== FAST GENERATOR FOR STATISTICAL EVALUATION ====
+import numpy as np
+import torch
+
+def fast_generate_batch(model, C_time_list, C_static_list, idx_list, batch_size=64):
+    """
+    Efficient batch generation for conditional TimeGAN.
+    Does NOT modify your original .py code.
+    """
+    device = model.device
+    T = C_time_list[0].shape[0]
+    synthetic = []
+
+    for start in range(0, len(idx_list), batch_size):
+        end = start + batch_size
+        batch_idx = idx_list[start:end]
+
+        # 1) Noise batch
+        Z = np.random.normal(0, 1, size=(len(batch_idx), T, model.opt.z_dim))
+        Z = torch.tensor(Z, dtype=torch.float32).to(device)
+
+        # 2) C_time batch
+        C_time_batch = np.array([C_time_list[i] for i in batch_idx])
+        C_time_batch = torch.tensor(C_time_batch, dtype=torch.float32).to(device)
+
+        # 3) C_static batch
+        C_static_batch = np.array([C_static_list[i] for i in batch_idx])[:, None, :]
+        C_static_batch = np.repeat(C_static_batch, T, axis=1)
+        C_static_batch = torch.tensor(C_static_batch, dtype=torch.float32).to(device)
+
+        # 4) Forward pass
+        with torch.no_grad():
+            C_embed = model.cond_emb(C_time_batch, C_static_batch)
+            E_hat = model.netg(Z, C_embed)
+            H_hat = model.nets(E_hat)
+            X_hat = model.netr(H_hat)
+
+        # Append
+        for seq in X_hat.cpu().numpy():
+            synthetic.append(seq.astype(np.float32))
+
+    return synthetic
+
+from evaluation_TGAN import evaluate_timegan
+
+import numpy as np
+n_eval = 2000
+X_list = X
+C_time_list = C_time
+C_static_list = C_static
+
+idx_list = np.random.choice(len(X_list), n_eval, replace=False)
+
+syn_data = fast_generate_batch(
+    model,
+    C_time_list,
+    C_static_list,
+    idx_list,
+    batch_size=128   # puedes probar 128 si tu GPU aguanta
+)
+# Evaluate
+real_eval = [X_list[i] for i in idx_list]
+
+results = evaluate_timegan(real_eval, syn_data, max_samples=2000)
+print(results)
+
+
+
